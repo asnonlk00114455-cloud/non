@@ -1,0 +1,199 @@
+-- โหลด Stellar UI Library
+local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/x2zu/OPEN-SOURCE-UI-ROBLOX/refs/heads/main/X2ZU%20UI-ROBLOX%20OPEN%20SOURCE/DummyUi-leak-by-x2zu/fetching-main/Tools/Framework.luau"))()
+
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- ฟังก์ชัน Request (รองรับ Executor หลายตัว)
+local req = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+
+-- GLOBAL CONFIG
+getgenv().Info = {
+    EngineOptions = { "Stockfish 17", "Sunfish" },
+    Connections = {}
+}
+
+getgenv().Settings = {
+    AutoPlay = false,
+    Engine = "Stockfish 17",
+    PreMoveDelay = 0.2, -- delay ก่อน AI คำนวณ
+    MoveDelay = 0.5     -- delay หลังเดินหมาก
+}
+
+-- Disconnect connections
+local function DisconnectAll(connections)
+    for _, connection in pairs(connections) do
+        if connection then
+            connection:Disconnect()
+        end
+    end
+end
+
+-- BestMove function
+local function BestMove(engine)
+    local selected = engine or getgenv().Settings.Engine
+    local tableset = ReplicatedStorage.InternalClientEvents.GetActiveTableset:Invoke()
+    if not tableset then return nil end
+
+    local FEN = tableset:WaitForChild("FEN").Value
+    local res
+
+    task.wait(getgenv().Settings.PreMoveDelay)
+
+    if selected == "Stockfish 17" then
+        local ok, err = pcall(function()
+            res = req({
+                Url = "https://chess-api.com/v1",
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = HttpService:JSONEncode({ fen = FEN }),
+            })
+        end)
+        if ok and res and res.Success then
+            local data = HttpService:JSONDecode(res.Body)
+            return data.from, data.to
+        else
+            warn("[Engine] Stockfish error:", err or res.StatusCode)
+            return nil, nil
+        end
+    elseif selected == "Sunfish" then
+        local ok, result = pcall(function()
+            local module = require(game:GetService("Players").LocalPlayer.PlayerScripts.AI.Sunfish)
+            return module:GetBestMove(FEN, 1000)
+        end)
+        if ok and result then
+            return result
+        else
+            warn("[Engine] Sunfish failed:", result)
+            return nil, nil
+        end
+    end
+end
+
+-- PlayMove function
+local function PlayMove(engine)
+    local from, to = BestMove(engine)
+    task.wait(getgenv().Settings.MoveDelay)
+    if from and to then
+        ReplicatedStorage.Chess.SubmitMove:InvokeServer(from .. to)
+        return true
+    elseif from then
+        ReplicatedStorage.Chess.SubmitMove:InvokeServer(from)
+        return true
+    end
+    return false
+end
+
+-- PlaySuccesfullMove function
+local function PlaySuccesfullMove()
+    local success = PlayMove()
+    if not success then
+        -- ถ้า Stockfish พัง → ลอง Sunfish
+        success = PlayMove("Sunfish")
+        if success then
+            Library:Notify({
+                Title = "Engine Fallback",
+                Desc = "Stockfish ล่ม → ใช้ Sunfish เดินแทน",
+                Time = 4
+            })
+        else
+            Library:Notify({
+                Title = "Error",
+                Desc = "Engine ทั้งสองล้มเหลว!",
+                Time = 4
+            })
+        end
+    end
+end
+
+-- AutoPlay function
+local function AutoPlay()
+    if not getgenv().Settings.AutoPlay then return end
+
+    DisconnectAll(getgenv().Info.Connections)
+
+    getgenv().Info.Connections["MoveReceived"] =
+        ReplicatedStorage.Chess.MovePlayedRemoteEvent.OnClientEvent:Connect(function()
+            task.wait(getgenv().Settings.PreMoveDelay)
+            PlaySuccesfullMove()
+        end)
+
+    getgenv().Info.Connections["GameStart"] =
+        ReplicatedStorage.Chess.StartGameEvent.OnClientEvent:Connect(function()
+            task.wait(getgenv().Settings.PreMoveDelay)
+            PlaySuccesfullMove()
+        end)
+
+    PlaySuccesfullMove()
+end
+
+-- CREATE WINDOW
+local Window = Library:Window({
+    Title = "Chess Club - Stellar UI",
+    Desc = "Auto Chess Powered by x2zu",
+    Icon = 105059922903197,
+    Theme = "Dark",
+    Config = {
+        Keybind = Enum.KeyCode.LeftControl,
+        Size = UDim2.new(0, 520, 0, 420)
+    },
+    CloseUIButton = {
+        Enabled = true,
+        Text = "CLOSE"
+    }
+})
+
+-- TAB: MAIN
+local Tab = Window:Tab({Title = "Main", Icon = "star"})
+do
+    Tab:Section({Title = "⚙ Engine Settings"})
+
+    Tab:Dropdown({
+        Title = "Select Engine",
+        List = getgenv().Info.EngineOptions,
+        Value = getgenv().Settings.Engine,
+        Callback = function(choice)
+            getgenv().Settings.Engine = choice
+        end
+    })
+
+    Tab:Toggle({
+        Title = "Auto Play Best Moves",
+        Desc = "ให้บอทเดินหมากอัตโนมัติ",
+        Value = false,
+        Callback = function(v)
+            getgenv().Settings.AutoPlay = v
+            if v then
+                task.spawn(AutoPlay)
+            else
+                DisconnectAll(getgenv().Info.Connections)
+            end
+        end
+    })
+
+    Tab:Button({
+        Title = "▶ Play Best Move",
+        Desc = "กดเพื่อเดินหมากที่ดีที่สุด",
+        Callback = function()
+            task.spawn(PlaySuccesfullMove)
+        end
+    })
+end
+
+-- TAB: SETTINGS
+local SettingsTab = Window:Tab({Title = "Settings", Icon = "wrench"})
+do
+    SettingsTab:Section({Title = "Config"})
+    SettingsTab:Button({
+        Title = "Reset Config",
+        Desc = "คืนค่าเริ่มต้นทั้งหมด",
+        Callback = function()
+            getgenv().Settings = {
+                AutoPlay = false,
+                Engine = "Stockfish 17",
+                PreMoveDelay = 0.2,
+                MoveDelay = 0.5
+            }
+        end
+    })
+end
