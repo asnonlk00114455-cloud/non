@@ -1,0 +1,205 @@
+-- โหลด Rayfield UI
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- ฟังก์ชัน Request รองรับ Executor หลายตัว
+local req = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+
+------------------------------------------------------
+-- GLOBAL CONFIG
+------------------------------------------------------
+getgenv().Info = {
+    EngineOptions = { "Stockfish 17", "Sunfish" },
+    Connections = {}
+}
+
+getgenv().Settings = {
+    AutoPlay = false,
+    Engine = "Stockfish 17",
+    MoveDelay = 0.5 -- เริ่มต้นดีเลย์ 0.5 วินาที
+}
+
+------------------------------------------------------
+-- ฟังก์ชัน Disconnect
+------------------------------------------------------
+local function DisconnectAll(connections)
+    for _, connection in pairs(connections) do
+        if connection then
+            connection:Disconnect()
+        end
+    end
+end
+
+------------------------------------------------------
+-- ฟังก์ชัน BestMove
+------------------------------------------------------
+local function BestMove(engine)
+    local selected = engine or getgenv().Settings.Engine
+    local tableset = ReplicatedStorage.InternalClientEvents.GetActiveTableset:Invoke()
+    if not tableset then return nil end
+
+    local FEN = tableset:WaitForChild("FEN").Value
+    local res
+
+    if selected == "Stockfish 17" then
+        local ok, err = pcall(function()
+            res = req({
+                Url = "https://chess-api.com/v1",
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = HttpService:JSONEncode({ fen = FEN }),
+            })
+        end)
+
+        if ok and res and res.Success then
+            local data = HttpService:JSONDecode(res.Body)
+            return data.from, data.to
+        else
+            warn("[Engine] Stockfish error:", err or res.StatusCode)
+            return nil, nil
+        end
+
+    elseif selected == "Sunfish" then
+        local ok, result = pcall(function()
+            local module = require(game:GetService("Players").LocalPlayer.PlayerScripts.AI.Sunfish)
+            return module:GetBestMove(FEN, 1000)
+        end)
+        if ok and result then
+            return result
+        else
+            warn("[Engine] Sunfish failed:", result)
+            return nil, nil
+        end
+    end
+end
+
+------------------------------------------------------
+-- ฟังก์ชัน PlayMove
+------------------------------------------------------
+local function PlayMove(engine)
+    local from, to = BestMove(engine)
+    task.wait(getgenv().Settings.MoveDelay) -- ใช้ดีเลย์จากสไลด์
+    if from and to then
+        ReplicatedStorage.Chess.SubmitMove:InvokeServer(from .. to)
+        return true
+    elseif from then
+        ReplicatedStorage.Chess.SubmitMove:InvokeServer(from)
+        return true
+    end
+    return false
+end
+
+------------------------------------------------------
+-- ฟังก์ชัน PlaySuccesfullMove
+------------------------------------------------------
+local function PlaySuccesfullMove()
+    local success = PlayMove()
+    if not success then
+        success = PlayMove("Sunfish")
+        if success then
+            Rayfield:Notify({
+                Title = "Engine Fallback",
+                Content = "Stockfish ล่ม → ใช้ Sunfish เดินแทน",
+                Duration = 4,
+                Callback = function() end
+            })
+        else
+            Rayfield:Notify({
+                Title = "Error",
+                Content = "Engine ทั้งสองล้มเหลว!",
+                Duration = 4,
+                Callback = function() end
+            })
+        end
+    end
+end
+
+------------------------------------------------------
+-- ฟังก์ชัน AutoPlay
+------------------------------------------------------
+local function AutoPlay()
+    if not getgenv().Settings.AutoPlay then return end
+
+    DisconnectAll(getgenv().Info.Connections)
+
+    getgenv().Info.Connections["MoveReceived"] =
+        ReplicatedStorage.Chess.MovePlayedRemoteEvent.OnClientEvent:Connect(function()
+            PlaySuccesfullMove()
+        end)
+
+    getgenv().Info.Connections["GameStart"] =
+        ReplicatedStorage.Chess.StartGameEvent.OnClientEvent:Connect(function()
+            PlaySuccesfullMove()
+        end)
+
+    PlaySuccesfullMove()
+end
+
+------------------------------------------------------
+-- สร้าง UI ด้วย Rayfield
+------------------------------------------------------
+local Window = Rayfield:CreateWindow({
+    Name = "Chess Club",
+    LoadingTitle = "Chess Club Loading",
+    LoadingSubtitle = "By x2zu",
+    ConfigurationSaving = {
+        Enabled = true,
+        FolderName = "ChessClubConfig",
+        FileName = "Settings"
+    },
+    Discord = {
+        Enabled = false
+    },
+    KeySystem = false
+})
+
+local MainTab = Window:CreateTab("Main")
+
+-- Dropdown เลือก Engine
+MainTab:CreateDropdown({
+    Name = "Select Engine",
+    Options = getgenv().Info.EngineOptions,
+    CurrentOption = getgenv().Settings.Engine,
+    Flag = "Engine",
+    Callback = function(option)
+        getgenv().Settings.Engine = option
+    end
+})
+
+-- Toggle AutoPlay
+MainTab:CreateToggle({
+    Name = "Auto Play Best Moves",
+    CurrentValue = getgenv().Settings.AutoPlay,
+    Flag = "AutoPlay",
+    Callback = function(state)
+        getgenv().Settings.AutoPlay = state
+        if state then
+            AutoPlay()
+        else
+            DisconnectAll(getgenv().Info.Connections)
+        end
+    end
+})
+
+-- Slider ปรับดีเลย์
+MainTab:CreateSlider({
+    Name = "Move Delay",
+    Range = {0,5}, -- ปรับสูงสุด 5 วินาที
+    Increment = 0.1,
+    Suffix = "s",
+    CurrentValue = getgenv().Settings.MoveDelay,
+    Flag = "MoveDelay",
+    Callback = function(value)
+        getgenv().Settings.MoveDelay = value
+    end
+})
+
+-- ปุ่มเดินหมากทันที
+MainTab:CreateButton({
+    Name = "▶ Play Best Move",
+    Callback = function()
+        PlaySuccesfullMove()
+    end
+})
