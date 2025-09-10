@@ -1,0 +1,519 @@
+--================================================================================--
+-- Chess Club Custom GUI v1.0 - Built for Roblox Studio
+-- Description: Custom draggable GUI with bubble icon, tabs, and integrated logic.
+-- Features: Dark theme, smooth tweens, full functionality from original script.
+-- Test in Roblox Studio: Place as LocalScript in StarterPlayer > StarterPlayerScripts.
+--================================================================================--
+
+-- Services
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local lplr = Players.LocalPlayer
+
+-- Request function (supports multiple executors)
+local req = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+
+-- Wait for game load
+repeat task.wait() until game:IsLoaded()
+if game.PlaceId ~= 139394516128799 then return end
+
+-- GLOBAL CONFIG
+getgenv().Info = {
+    EngineOptions = { "Stockfish 17", "Sunfish" },
+    Connections = {}
+}
+
+getgenv().Settings = {
+    AutoPlay = false,
+    Engine = "Stockfish 17",
+    Delay = 2
+}
+
+-- Disconnect function
+local function DisconnectAll(connections)
+    for _, connection in pairs(connections) do
+        if connection then
+            connection:Disconnect()
+        end
+    end
+end
+
+-- BestMove function (with yields to prevent freeze)
+local function BestMove(engine)
+    local selected = engine or getgenv().Settings.Engine
+    repeat task.wait(0.1) until ReplicatedStorage.InternalClientEvents.GetActiveTableset:Invoke() ~= nil
+    local tableset = ReplicatedStorage.InternalClientEvents.GetActiveTableset:Invoke()
+    if not tableset then return nil end
+
+    local FEN = tableset:WaitForChild("FEN").Value
+    local res
+
+    if selected == "Stockfish 17" then
+        local ok, err = pcall(function()
+            res = req({
+                Url = "https://chess-api.com/v1",
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = HttpService:JSONEncode({ fen = FEN }),
+            })
+        end)
+
+        if ok and res and res.Success then
+            local data = HttpService:JSONDecode(res.Body)
+            task.wait(0) -- Yield after API
+            return data.from, data.to
+        else
+            warn("[Engine Error] Stockfish failed:", err or res.StatusCode)
+            return nil, nil
+        end
+
+    elseif selected == "Sunfish" then
+        local ok, result = pcall(function()
+            local module = require(lplr.PlayerScripts.AI.Sunfish)
+            return module:GetBestMove(FEN, 1000) -- Reduced time for less freeze
+        end)
+        if ok and result then
+            task.wait(0) -- Yield after Sunfish
+            return result
+        else
+            warn("[Engine Error] Sunfish failed:", result)
+            return nil, nil
+        end
+    end
+end
+
+-- PlayMove function
+local function PlayMove(engine)
+    local from, to = BestMove(engine)
+    task.wait(0) -- Yield before submit
+    if from and to then
+        ReplicatedStorage.Chess.SubmitMove:InvokeServer(from .. to)
+        return true
+    elseif from then
+        ReplicatedStorage.Chess.SubmitMove:InvokeServer(from)
+        return true
+    end
+    return false
+end
+
+-- PlaySuccesfullMove function
+local function PlaySuccesfullMove()
+    local success = PlayMove()
+    if not success then
+        success = PlayMove("Sunfish")
+        if success then
+            print("[Engine Fallback] Stockfish failed → Using Sunfish instead")
+        else
+            warn("[Engine Error] Both engines failed to move!")
+        end
+    else
+        print("[Engine] Move played successfully")
+    end
+end
+
+-- AutoPlay function
+local function AutoPlay()
+    if not getgenv().Settings.AutoPlay then return end
+
+    DisconnectAll(getgenv().Info.Connections)
+
+    getgenv().Info.Connections["MoveReceived"] = ReplicatedStorage.Chess.MovePlayedRemoteEvent.OnClientEvent:Connect(function()
+        task.wait(tonumber(getgenv().Settings.Delay) or 2)
+        PlaySuccesfullMove()
+    end)
+
+    getgenv().Info.Connections["GameStart"] = ReplicatedStorage.Chess.StartGameEvent.OnClientEvent:Connect(function()
+        task.wait(tonumber(getgenv().Settings.Delay) or 2)
+        PlaySuccesfullMove()
+    end)
+
+    PlaySuccesfullMove()
+end
+
+-- GUI Creation
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "ChessClubGUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = lplr:WaitForChild("PlayerGui")
+
+-- Colors (Dark Theme)
+local Colors = {
+    BG = Color3.fromRGB(25, 25, 25),
+    FG = Color3.fromRGB(45, 45, 45),
+    Accent = Color3.fromRGB(200, 50, 50), -- Red for chess theme
+    Text = Color3.fromRGB(255, 255, 255),
+    TextDark = Color3.fromRGB(200, 200, 200),
+    Border = Color3.fromRGB(60, 60, 60)
+}
+
+-- Draggable Function
+local function makeDraggable(frame)
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+
+    frame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+        end
+    end)
+
+    frame.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+-- Bubble Icon (Visible when GUI closed)
+local Bubble = Instance.new("TextButton")
+Bubble.Name = "BubbleIcon"
+Bubble.Size = UDim2.new(0, 60, 0, 60)
+Bubble.Position = UDim2.new(0, 20, 0.5, -30)
+Bubble.AnchorPoint = Vector2.new(0, 0.5)
+Bubble.Text = "♔" -- Chess king icon
+Bubble.Font = Enum.Font.GothamBold
+Bubble.TextSize = 24
+Bubble.TextColor3 = Colors.Text
+Bubble.BackgroundColor3 = Colors.Accent
+Bubble.BorderSizePixel = 0
+Bubble.Parent = ScreenGui
+Bubble.ZIndex = 100
+makeDraggable(Bubble)
+
+-- Tween for Bubble hover
+local bubbleTween = TweenService:Create(Bubble, TweenInfo.new(0.2), {Size = UDim2.new(0, 70, 0, 70)})
+Bubble.MouseEnter:Connect(function() bubbleTween:Play() end)
+Bubble.MouseLeave:Connect(function() bubbleTween:Play() end) -- Reverse size
+
+-- Main GUI Frame (Large, draggable, toggleable)
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainGUI"
+MainFrame.Size = UDim2.new(0, 450, 0, 350)
+MainFrame.Position = UDim2.new(0.5, -225, 0.5, -175)
+MainFrame.BackgroundColor3 = Colors.BG
+MainFrame.BorderSizePixel = 2
+MainFrame.BorderColor3 = Colors.Border
+MainFrame.Visible = false
+MainFrame.ZIndex = 50
+MainFrame.Parent = ScreenGui
+
+-- Title Bar (Draggable)
+local TitleBar = Instance.new("Frame")
+TitleBar.Name = "TitleBar"
+TitleBar.Size = UDim2.new(1, 0, 0, 40)
+TitleBar.Position = UDim2.new(0, 0, 0, 0)
+TitleBar.BackgroundColor3 = Colors.FG
+TitleBar.BorderSizePixel = 0
+TitleBar.ZIndex = 51
+TitleBar.Parent = MainFrame
+makeDraggable(TitleBar)
+
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Size = UDim2.new(1, -60, 1, 0)
+TitleLabel.Position = UDim2.new(0, 10, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "Chess Club Engine"
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextColor3 = Colors.Text
+TitleLabel.TextSize = 18
+TitleLabel.ZIndex = 52
+TitleLabel.Parent = TitleBar
+
+-- Close Button
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -35, 0, 5)
+CloseBtn.AnchorPoint = Vector2.new(1, 0)
+CloseBtn.Text = "X"
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextColor3 = Colors.Text
+CloseBtn.BackgroundColor3 = Colors.Accent
+CloseBtn.BorderSizePixel = 0
+CloseBtn.ZIndex = 52
+CloseBtn.Parent = TitleBar
+
+-- Tab Buttons
+local TabFrame = Instance.new("Frame")
+TabFrame.Name = "TabFrame"
+TabFrame.Size = UDim2.new(1, 0, 0, 40)
+TabFrame.Position = UDim2.new(0, 0, 0, 40)
+TabFrame.BackgroundColor3 = Colors.FG
+TabFrame.BorderSizePixel = 0
+TabFrame.ZIndex = 51
+TabFrame.Parent = MainFrame
+
+local MainTabBtn = Instance.new("TextButton")
+MainTabBtn.Size = UDim2.new(0.5, -1, 1, 0)
+MainTabBtn.Position = UDim2.new(0, 0, 0, 0)
+MainTabBtn.Text = "Main"
+MainTabBtn.Font = Enum.Font.Gotham
+MainTabBtn.TextColor3 = Colors.TextDark
+MainTabBtn.BackgroundColor3 = Colors.BG
+MainTabBtn.BorderSizePixel = 0
+MainTabBtn.ZIndex = 52
+MainTabBtn.Parent = TabFrame
+
+local SettingsTabBtn = Instance.new("TextButton")
+SettingsTabBtn.Size = UDim2.new(0.5, -1, 1, 0)
+SettingsTabBtn.Position = UDim2.new(0.5, 0, 0, 0)
+SettingsTabBtn.Text = "Settings"
+SettingsTabBtn.Font = Enum.Font.Gotham
+SettingsTabBtn.TextColor3 = Colors.TextDark
+SettingsTabBtn.BackgroundColor3 = Colors.BG
+SettingsTabBtn.BorderSizePixel = 0
+SettingsTabBtn.ZIndex = 52
+SettingsTabBtn.Parent = TabFrame
+
+-- Content Frames
+local MainContent = Instance.new("Frame")
+MainContent.Name = "MainContent"
+MainContent.Size = UDim2.new(1, -20, 1, -80)
+MainContent.Position = UDim2.new(0, 10, 0, 80)
+MainContent.BackgroundTransparency = 1
+MainContent.ZIndex = 51
+MainContent.Parent = MainFrame
+MainContent.Visible = true
+
+local SettingsContent = Instance.new("Frame")
+SettingsContent.Name = "SettingsContent"
+SettingsContent.Size = UDim2.new(1, -20, 1, -80)
+SettingsContent.Position = UDim2.new(0, 10, 0, 80)
+SettingsContent.BackgroundTransparency = 1
+SettingsContent.ZIndex = 51
+SettingsContent.Parent = MainFrame
+SettingsContent.Visible = false
+
+-- Custom Dropdown for Engine (Simple button list)
+local DropdownFrame = Instance.new("Frame")
+DropdownFrame.Name = "EngineDropdown"
+DropdownFrame.Size = UDim2.new(0.9, 0, 0, 100)
+DropdownFrame.Position = UDim2.new(0.05, 0, 0, 10)
+DropdownFrame.BackgroundColor3 = Colors.FG
+DropdownFrame.BorderSizePixel = 1
+DropdownFrame.BorderColor3 = Colors.Border
+DropdownFrame.ZIndex = 52
+DropdownFrame.Parent = MainContent
+DropdownFrame.Visible = false -- Hidden by default
+
+local DropdownLabel = Instance.new("TextLabel")
+DropdownLabel.Size = UDim2.new(1, 0, 0.3, 0)
+DropdownLabel.Position = UDim2.new(0, 0, 0, 0)
+DropdownLabel.BackgroundTransparency = 1
+DropdownLabel.Text = "Engine: " .. getgenv().Settings.Engine
+DropdownLabel.Font = Enum.Font.Gotham
+DropdownLabel.TextColor3 = Colors.Text
+DropdownLabel.TextSize = 14
+DropdownLabel.ZIndex = 53
+DropdownLabel.Parent = DropdownFrame
+
+for i, option in ipairs(getgenv().Info.EngineOptions) do
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0.7, 0)
+    btn.Position = UDim2.new(0, 0, 0.3 + (i-1)*0.7, 0)
+    btn.Text = option
+    btn.Font = Enum.Font.Gotham
+    btn.TextColor3 = Colors.Text
+    btn.BackgroundColor3 = Colors.BG
+    btn.BorderSizePixel = 0
+    btn.ZIndex = 53
+    btn.Parent = DropdownFrame
+    btn.MouseButton1Click:Connect(function()
+        getgenv().Settings.Engine = option
+        DropdownLabel.Text = "Engine: " .. option
+        DropdownFrame.Visible = false
+        print("[UI] Engine switched to:", option)
+    end)
+end
+
+local EngineBtn = Instance.new("TextButton")
+EngineBtn.Size = UDim2.new(0.9, 0, 0, 30)
+EngineBtn.Position = UDim2.new(0.05, 0, 0, 10)
+EngineBtn.Text = "Select Engine ▼"
+EngineBtn.Font = Enum.Font.Gotham
+EngineBtn.TextColor3 = Colors.Text
+EngineBtn.BackgroundColor3 = Colors.FG
+EngineBtn.BorderSizePixel = 1
+EngineBtn.BorderColor3 = Colors.Border
+EngineBtn.ZIndex = 52
+EngineBtn.Parent = MainContent
+EngineBtn.MouseButton1Click:Connect(function()
+    DropdownFrame.Visible = not DropdownFrame.Visible
+end)
+
+-- Toggle Auto Play
+local AutoToggle = Instance.new("TextButton")
+AutoToggle.Size = UDim2.new(0.9, 0, 0, 30)
+AutoToggle.Position = UDim2.new(0.05, 0, 0, 50)
+AutoToggle.Text = "Auto Play: OFF"
+AutoToggle.Font = Enum.Font.GothamBold
+AutoToggle.TextColor3 = Colors.Text
+AutoToggle.BackgroundColor3 = Colors.BG
+AutoToggle.BorderSizePixel = 1
+AutoToggle.BorderColor3 = Colors.Border
+AutoToggle.ZIndex = 52
+AutoToggle.Parent = MainContent
+AutoToggle.MouseButton1Click:Connect(function()
+    getgenv().Settings.AutoPlay = not getgenv().Settings.AutoPlay
+    AutoToggle.Text = "Auto Play: " .. (getgenv().Settings.AutoPlay and "ON" or "OFF")
+    AutoToggle.BackgroundColor3 = getgenv().Settings.AutoPlay and Colors.Accent or Colors.BG
+    if getgenv().Settings.AutoPlay then
+        task.spawn(AutoPlay)
+    else
+        DisconnectAll(getgenv().Info.Connections)
+    end
+end)
+
+-- Play Best Move Button
+local PlayBtn = Instance.new("TextButton")
+PlayBtn.Size = UDim2.new(0.9, 0, 0, 35)
+PlayBtn.Position = UDim2.new(0.05, 0, 0, 90)
+PlayBtn.Text = "▶ Play Best Move"
+PlayBtn.Font = Enum.Font.GothamBold
+PlayBtn.TextColor3 = Colors.Text
+PlayBtn.BackgroundColor3 = Colors.Accent
+PlayBtn.BorderSizePixel = 1
+PlayBtn.BorderColor3 = Colors.Border
+PlayBtn.ZIndex = 52
+PlayBtn.Parent = MainContent
+PlayBtn.MouseButton1Click:Connect(function()
+    task.spawn(PlaySuccesfullMove)
+end)
+
+-- Custom Slider for Delay
+local SliderFrame = Instance.new("Frame")
+SliderFrame.Size = UDim2.new(0.9, 0, 0, 40)
+SliderFrame.Position = UDim2.new(0.05, 0, 0, 140)
+SliderFrame.BackgroundColor3 = Colors.FG
+SliderFrame.BorderSizePixel = 1
+SliderFrame.BorderColor3 = Colors.Border
+SliderFrame.ZIndex = 52
+SliderFrame.Parent = MainContent
+
+local SliderLabel = Instance.new("TextLabel")
+SliderLabel.Size = UDim2.new(0.3, 0, 1, 0)
+SliderLabel.Position = UDim2.new(0, 0, 0, 0)
+SliderLabel.BackgroundTransparency = 1
+SliderLabel.Text = "Delay: 2s"
+SliderLabel.Font = Enum.Font.Gotham
+SliderLabel.TextColor3 = Colors.Text
+SliderLabel.TextSize = 14
+SliderLabel.ZIndex = 53
+SliderLabel.Parent = SliderFrame
+
+local SliderBar = Instance.new("Frame")
+SliderBar.Size = UDim2.new(0.7, 0, 0, 20)
+SliderBar.Position = UDim2.new(0.3, 0, 0.5, -10)
+SliderBar.BackgroundColor3 = Colors.BG
+SliderBar.BorderSizePixel = 0
+SliderBar.ZIndex = 53
+SliderBar.Parent = SliderFrame
+
+local SliderKnob = Instance.new("TextButton")
+SliderKnob.Size = UDim2.new(0, 20, 0, 20)
+SliderKnob.Position = UDim2.new(0, (getgenv().Settings.Delay / 10) * (SliderBar.AbsoluteSize.X - 20), 0, 0)
+SliderKnob.AnchorPoint = Vector2.new(0, 0.5)
+SliderKnob.Text = ""
+SliderKnob.BackgroundColor3 = Colors.Accent
+SliderKnob.BorderSizePixel = 0
+SliderKnob.ZIndex = 54
+SliderKnob.Parent = SliderBar
+
+-- Slider Logic
+local draggingSlider = false
+SliderKnob.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        draggingSlider = true
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if draggingSlider and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local relativeX = math.clamp((input.Position.X - SliderBar.AbsolutePosition.X) / SliderBar.AbsoluteSize.X, 0, 1)
+        local value = math.floor(relativeX * 10)
+        getgenv().Settings.Delay = value
+        SliderKnob.Position = UDim2.new(0, relativeX * (SliderBar.AbsoluteSize.X - 20), 0, 0)
+        SliderLabel.Text = "Delay: " .. value .. "s"
+        print("[UI] Delay updated to:", value, "seconds")
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        draggingSlider = false
+    end
+end)
+
+-- Settings Content: Reset Button
+local ResetBtn = Instance.new("TextButton")
+ResetBtn.Size = UDim2.new(0.9, 0, 0, 35)
+ResetBtn.Position = UDim2.new(0.05, 0, 0, 10)
+ResetBtn.Text = "Reset Config"
+ResetBtn.Font = Enum.Font.GothamBold
+ResetBtn.TextColor3 = Colors.Text
+ResetBtn.BackgroundColor3 = Colors.BG
+ResetBtn.BorderSizePixel = 1
+ResetBtn.BorderColor3 = Colors.Border
+ResetBtn.ZIndex = 52
+ResetBtn.Parent = SettingsContent
+ResetBtn.MouseButton1Click:Connect(function()
+    getgenv().Settings = {
+        AutoPlay = false,
+        Engine = "Stockfish 17",
+        Delay = 2
+    }
+    AutoToggle.Text = "Auto Play: OFF"
+    AutoToggle.BackgroundColor3 = Colors.BG
+    DropdownLabel.Text = "Engine: " .. getgenv().Settings.Engine
+    SliderLabel.Text = "Delay: 2s"
+    SliderKnob.Position = UDim2.new(0, (2 / 10) * (SliderBar.AbsoluteSize.X - 20), 0, 0)
+    DisconnectAll(getgenv().Info.Connections)
+    getgenv().Settings.AutoPlay = false
+    print("[Config] Reset completed.")
+end)
+
+-- Tab Switching
+local function switchTab(tab)
+    MainContent.Visible = tab == "Main"
+    SettingsContent.Visible = tab == "Settings"
+    MainTabBtn.BackgroundColor3 = tab == "Main" and Colors.Accent or Colors.BG
+    MainTabBtn.TextColor3 = tab == "Main" and Colors.Text or Colors.TextDark
+    SettingsTabBtn.BackgroundColor3 = tab == "Settings" and Colors.Accent or Colors.BG
+    SettingsTabBtn.TextColor3 = tab == "Settings" and Colors.Text or Colors.TextDark
+end
+
+MainTabBtn.MouseButton1Click:Connect(function() switchTab("Main") end)
+SettingsTabBtn.MouseButton1Click:Connect(function() switchTab("Settings") end)
+
+-- Close Button Logic
+CloseBtn.MouseButton1Click:Connect(function()
+    MainFrame.Visible = false
+    Bubble.Visible = true
+end)
+
+-- Bubble Toggle
+Bubble.MouseButton1Click:Connect(function()
+    Bubble.Visible = false
+    MainFrame.Visible = true
+    switchTab("Main") -- Default to Main tab
+end)
+
+-- Initial Setup
+Bubble.Visible = true
+MainFrame.Visible = false
+switchTab("Main")
+
+-- Notify
+print("[UI] Chess Club Custom GUI loaded successfully! Test in Studio.")
